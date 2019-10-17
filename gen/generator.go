@@ -121,6 +121,11 @@ func (g *Generator) OmitEmpty() {
 	g.omitEmpty = true
 }
 
+func (g *Generator) AddType(t reflect.Type) {
+	g.addType(t)
+	g.marshalers[t] = true
+}
+
 // addTypes requests to generate encoding/decoding funcs for the given type.
 func (g *Generator) addType(t reflect.Type) {
 	if g.typesSeen[t] {
