@@ -1,81 +1,168 @@
 package gen
 
 import (
-	"encoding"
-	"encoding/json"
 	"fmt"
-	"reflect"
+	"go/types"
+	"runtime"
 	"strings"
 	"unicode"
 
-	"github.com/mailru/easyjson"
+	"golang.org/x/tools/go/packages"
 )
 
 // Target this byte size for initial slice allocation to reduce garbage collection.
 const minSliceBytes = 64
 
-func (g *Generator) getDecoderName(t reflect.Type) string {
+func (g *Generator) getDecoderName(t types.Type) string {
 	return g.functionName("decode", t)
 }
 
-var primitiveDecoders = map[reflect.Kind]string{
-	reflect.String:  "in.String()",
-	reflect.Bool:    "in.Bool()",
-	reflect.Int:     "in.Int()",
-	reflect.Int8:    "in.Int8()",
-	reflect.Int16:   "in.Int16()",
-	reflect.Int32:   "in.Int32()",
-	reflect.Int64:   "in.Int64()",
-	reflect.Uint:    "in.Uint()",
-	reflect.Uint8:   "in.Uint8()",
-	reflect.Uint16:  "in.Uint16()",
-	reflect.Uint32:  "in.Uint32()",
-	reflect.Uint64:  "in.Uint64()",
-	reflect.Float32: "in.Float32()",
-	reflect.Float64: "in.Float64()",
+var primitiveDecoders = map[types.BasicKind]string{
+	types.String:  "in.String()",
+	types.Bool:    "in.Bool()",
+	types.Int:     "in.Int()",
+	types.Int8:    "in.Int8()",
+	types.Int16:   "in.Int16()",
+	types.Int32:   "in.Int32()",
+	types.Int64:   "in.Int64()",
+	types.Uint:    "in.Uint()",
+	types.Uint8:   "in.Uint8()",
+	types.Uint16:  "in.Uint16()",
+	types.Uint32:  "in.Uint32()",
+	types.Uint64:  "in.Uint64()",
+	types.Float32: "in.Float32()",
+	types.Float64: "in.Float64()",
 }
 
-var primitiveStringDecoders = map[reflect.Kind]string{
-	reflect.String:  "in.String()",
-	reflect.Int:     "in.IntStr()",
-	reflect.Int8:    "in.Int8Str()",
-	reflect.Int16:   "in.Int16Str()",
-	reflect.Int32:   "in.Int32Str()",
-	reflect.Int64:   "in.Int64Str()",
-	reflect.Uint:    "in.UintStr()",
-	reflect.Uint8:   "in.Uint8Str()",
-	reflect.Uint16:  "in.Uint16Str()",
-	reflect.Uint32:  "in.Uint32Str()",
-	reflect.Uint64:  "in.Uint64Str()",
-	reflect.Uintptr: "in.UintptrStr()",
-	reflect.Float32: "in.Float32Str()",
-	reflect.Float64: "in.Float64Str()",
+var primitiveStringDecoders = map[types.BasicKind]string{
+	types.String:  "in.String()",
+	types.Int:     "in.IntStr()",
+	types.Int8:    "in.Int8Str()",
+	types.Int16:   "in.Int16Str()",
+	types.Int32:   "in.Int32Str()",
+	types.Int64:   "in.Int64Str()",
+	types.Uint:    "in.UintStr()",
+	types.Uint8:   "in.Uint8Str()",
+	types.Uint16:  "in.Uint16Str()",
+	types.Uint32:  "in.Uint32Str()",
+	types.Uint64:  "in.Uint64Str()",
+	types.Uintptr: "in.UintptrStr()",
+	types.Float32: "in.Float32Str()",
+	types.Float64: "in.Float64Str()",
 }
 
 var customDecoders = map[string]string{
 	"json.Number": "in.JsonNumber()",
 }
 
+// implements returns false if t doesn't implement i
+//
+// The standard types.Implements panics on false, making it inconvenient for
+// simple checking.
+func implements(t types.Type, i *types.Interface) (ok bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			ok = false
+		}
+	}()
+	ok = types.Implements(t, i)
+
+	return
+}
+
+var easyjsonUnmarshaler, jsonUnmarshaler, encodingTextUnmarshaler *types.Interface
+
+func init() {
+	pkgs, err := packages.Load(
+		&packages.Config{Mode: packages.NeedTypes | packages.NeedSyntax | packages.NeedTypesInfo},
+		"encoding", "encoding/json", "github.com/mailru/easyjson",
+	)
+	if err != nil {
+		panic(err.Error())
+	}
+
+	if len(pkgs) != 3 {
+		panic("should have found exactly three packages (for encoding, encoding/json, and github.com/mailru/easyjson)")
+	}
+
+	// pkg[0]: encoding
+	for _, o := range pkgs[0].TypesInfo.Defs {
+		if o == nil {
+			continue
+		}
+		switch o.Name() {
+			case "TextUnmarshaler":
+				encodingTextUnmarshaler = o.Type().Underlying().(*types.Interface)
+			case "TextMarshaler":
+				encodingTextMarshaler = o.Type().Underlying().(*types.Interface)
+		}
+	}
+
+	// pkg[1]: encoding/json
+	for _, o := range pkgs[1].TypesInfo.Defs {
+		if o == nil {
+			continue
+		}
+		switch o.Name() {
+			case "Unmarshaler":
+				jsonUnmarshaler = o.Type().Underlying().(*types.Interface)
+			case "Marshaler":
+				jsonMarshaler = o.Type().Underlying().(*types.Interface)
+		}
+	}
+
+	// pkg[2]: github.com/mailru/easyjson
+	for _, o := range pkgs[2].TypesInfo.Defs {
+		if o == nil {
+			continue
+		}
+		switch o.Name() {
+			case "Unmarshaler":
+				easyjsonUnmarshaler = o.Type().Underlying().(*types.Interface)
+			case "Marshaler":
+				easyjsonMarshaler = o.Type().Underlying().(*types.Interface)
+			case "Optional":
+				easyjsonOptional = o.Type().Underlying().(*types.Interface)
+		}
+	}
+
+	switch {
+	case encodingTextUnmarshaler == nil:
+			panic("encodingTextUnmarshaler not set")
+	case encodingTextMarshaler == nil:
+			panic("encodingTextMarshaler not set")
+	case jsonUnmarshaler == nil:
+			panic("jsonUnmarshaler not set")
+	case jsonMarshaler == nil:
+			panic("jsonMarshaler not set")
+	case easyjsonUnmarshaler == nil:
+			panic("easyjsonUnmarshaler not set")
+	case easyjsonUnmarshaler == nil:
+			panic("easyjsonUnmarshaler not set")
+	case easyjsonOptional == nil:
+			panic("easyjsonOptional not set")
+	}
+}
+
 // genTypeDecoder generates decoding code for the type t, but uses unmarshaler interface if implemented by t.
-func (g *Generator) genTypeDecoder(t reflect.Type, out string, tags fieldTags, indent int) error {
+func (g *Generator) genTypeDecoder(t types.Type, out string, tags fieldTags, indent int) error {
 	ws := strings.Repeat("  ", indent)
 
-	unmarshalerIface := reflect.TypeOf((*easyjson.Unmarshaler)(nil)).Elem()
-	if reflect.PtrTo(t).Implements(unmarshalerIface) {
+	p := types.NewPointer(t)
+
+	if implements(p, easyjsonUnmarshaler) {
 		fmt.Fprintln(g.out, ws+"("+out+").UnmarshalEasyJSON(in)")
 		return nil
 	}
 
-	unmarshalerIface = reflect.TypeOf((*json.Unmarshaler)(nil)).Elem()
-	if reflect.PtrTo(t).Implements(unmarshalerIface) {
+	if implements(p, jsonUnmarshaler) {
 		fmt.Fprintln(g.out, ws+"if data := in.Raw(); in.Ok() {")
 		fmt.Fprintln(g.out, ws+"  in.AddError( ("+out+").UnmarshalJSON(data) )")
 		fmt.Fprintln(g.out, ws+"}")
 		return nil
 	}
 
-	unmarshalerIface = reflect.TypeOf((*encoding.TextUnmarshaler)(nil)).Elem()
-	if reflect.PtrTo(t).Implements(unmarshalerIface) {
+	if implements(p, encodingTextUnmarshaler) {
 		fmt.Fprintln(g.out, ws+"if data := in.UnsafeBytes(); in.Ok() {")
 		fmt.Fprintln(g.out, ws+"  in.AddError( ("+out+").UnmarshalText(data) )")
 		fmt.Fprintln(g.out, ws+"}")
@@ -87,34 +174,36 @@ func (g *Generator) genTypeDecoder(t reflect.Type, out string, tags fieldTags, i
 }
 
 // returns true of the type t implements one of the custom unmarshaler interfaces
-func hasCustomUnmarshaler(t reflect.Type) bool {
-	t = reflect.PtrTo(t)
-	return t.Implements(reflect.TypeOf((*easyjson.Unmarshaler)(nil)).Elem()) ||
-		t.Implements(reflect.TypeOf((*json.Unmarshaler)(nil)).Elem()) ||
-		t.Implements(reflect.TypeOf((*encoding.TextUnmarshaler)(nil)).Elem())
+func hasCustomUnmarshaler(t types.Type) bool {
+	t = types.NewPointer(t)
+	return implements(t, easyjsonUnmarshaler) ||
+		implements(t, jsonUnmarshaler) ||
+		implements(t, encodingTextUnmarshaler)
 }
 
 // genTypeDecoderNoCheck generates decoding code for the type t.
-func (g *Generator) genTypeDecoderNoCheck(t reflect.Type, out string, tags fieldTags, indent int) error {
+func (g *Generator) genTypeDecoderNoCheck(t types.Type, out string, tags fieldTags, indent int) error {
 	ws := strings.Repeat("  ", indent)
 	// Check whether type is primitive, needs to be done after interface check.
 	if dec := customDecoders[t.String()]; dec != "" {
 		fmt.Fprintln(g.out, ws+out+" = "+dec)
 		return nil
-	} else if dec := primitiveStringDecoders[t.Kind()]; dec != "" && tags.asString {
-		fmt.Fprintln(g.out, ws+out+" = "+g.getType(t)+"("+dec+")")
-		return nil
-	} else if dec := primitiveDecoders[t.Kind()]; dec != "" {
-		fmt.Fprintln(g.out, ws+out+" = "+g.getType(t)+"("+dec+")")
-		return nil
+	} else if b, ok := t.(*types.Basic); ok {
+		if dec := primitiveStringDecoders[b.Kind()]; dec != "" && tags.asString {
+			fmt.Fprintln(g.out, ws+out+" = "+g.getType(t)+"("+dec+")")
+			return nil
+		} else if dec := primitiveDecoders[b.Kind()]; dec != "" {
+			fmt.Fprintln(g.out, ws+out+" = "+g.getType(t)+"("+dec+")")
+			return nil
+		}
 	}
 
-	switch t.Kind() {
-	case reflect.Slice:
+	switch v := t.Underlying().(type) {
+	case *types.Slice:
 		tmpVar := g.uniqueVarName()
-		elem := t.Elem()
+		elem := v.Elem()
 
-		if elem.Kind() == reflect.Uint8 && elem.Name() == "uint8" {
+		if b, ok := elem.(*types.Basic); ok && b.Kind() == types.Uint8 {
 			fmt.Fprintln(g.out, ws+"if in.IsNull() {")
 			fmt.Fprintln(g.out, ws+"  in.Skip()")
 			fmt.Fprintln(g.out, ws+"  "+out+" = nil")
@@ -123,8 +212,7 @@ func (g *Generator) genTypeDecoderNoCheck(t reflect.Type, out string, tags field
 			fmt.Fprintln(g.out, ws+"}")
 
 		} else {
-
-			capacity := minSliceBytes / elem.Size()
+			capacity := minSliceBytes / types.SizesFor(runtime.Compiler, runtime.GOARCH).Sizeof(elem)
 			if capacity == 0 {
 				capacity = 1
 			}
@@ -157,11 +245,11 @@ func (g *Generator) genTypeDecoderNoCheck(t reflect.Type, out string, tags field
 			fmt.Fprintln(g.out, ws+"}")
 		}
 
-	case reflect.Array:
+	case *types.Array:
 		iterVar := g.uniqueVarName()
-		elem := t.Elem()
+		elem := v.Elem()
 
-		if elem.Kind() == reflect.Uint8 && elem.Name() == "uint8" {
+		if b, ok := elem.(*types.Basic); ok && b.Kind() == types.Uint8 {
 			fmt.Fprintln(g.out, ws+"if in.IsNull() {")
 			fmt.Fprintln(g.out, ws+"  in.Skip()")
 			fmt.Fprintln(g.out, ws+"} else {")
@@ -170,7 +258,7 @@ func (g *Generator) genTypeDecoderNoCheck(t reflect.Type, out string, tags field
 
 		} else {
 
-			length := t.Len()
+			length := v.Len()
 
 			fmt.Fprintln(g.out, ws+"if in.IsNull() {")
 			fmt.Fprintln(g.out, ws+"  in.Skip()")
@@ -194,7 +282,7 @@ func (g *Generator) genTypeDecoderNoCheck(t reflect.Type, out string, tags field
 			fmt.Fprintln(g.out, ws+"}")
 		}
 
-	case reflect.Struct:
+	case *types.Struct:
 		dec := g.getDecoderName(t)
 		g.addType(t)
 
@@ -205,28 +293,32 @@ func (g *Generator) genTypeDecoderNoCheck(t reflect.Type, out string, tags field
 			fmt.Fprintln(g.out, ws+dec+"(in, &"+out+")")
 		}
 
-	case reflect.Ptr:
+	case *types.Pointer:
 		fmt.Fprintln(g.out, ws+"if in.IsNull() {")
 		fmt.Fprintln(g.out, ws+"  in.Skip()")
 		fmt.Fprintln(g.out, ws+"  "+out+" = nil")
 		fmt.Fprintln(g.out, ws+"} else {")
 		fmt.Fprintln(g.out, ws+"  if "+out+" == nil {")
-		fmt.Fprintln(g.out, ws+"    "+out+" = new("+g.getType(t.Elem())+")")
+		fmt.Fprintln(g.out, ws+"    "+out+" = new("+g.getType(v.Elem())+")")
 		fmt.Fprintln(g.out, ws+"  }")
 
-		if err := g.genTypeDecoder(t.Elem(), "*"+out, tags, indent+1); err != nil {
+		if err := g.genTypeDecoder(v.Elem(), "*"+out, tags, indent+1); err != nil {
 			return err
 		}
 
 		fmt.Fprintln(g.out, ws+"}")
 
-	case reflect.Map:
-		key := t.Key()
-		keyDec, ok := primitiveStringDecoders[key.Kind()]
+	case *types.Map:
+		key := v.Key()
+		b, ok := key.(*types.Basic)
+		if !ok {
+			return fmt.Errorf("map type %v not supported: only string and integer keys and types implementing json.Unmarshaler are allowed", key)
+		}
+		keyDec, ok := primitiveStringDecoders[b.Kind()]
 		if !ok && !hasCustomUnmarshaler(key) {
 			return fmt.Errorf("map type %v not supported: only string and integer keys and types implementing json.Unmarshaler are allowed", key)
 		} // else assume the caller knows what they are doing and that the custom unmarshaler performs the translation from string or integer keys to the key type
-		elem := t.Elem()
+		elem := v.Elem()
 		tmpVar := g.uniqueVarName()
 
 		fmt.Fprintln(g.out, ws+"if in.IsNull() {")
@@ -241,7 +333,7 @@ func (g *Generator) genTypeDecoderNoCheck(t reflect.Type, out string, tags field
 
 		fmt.Fprintln(g.out, ws+"  for !in.IsDelim('}') {")
 		// NOTE: extra check for TextUnmarshaler. It overrides default methods.
-		if reflect.PtrTo(key).Implements(reflect.TypeOf((*encoding.TextUnmarshaler)(nil)).Elem()) {
+		if implements(types.NewPointer(key), encodingTextUnmarshaler) {
 			fmt.Fprintln(g.out, ws+"    var key "+g.getType(key))
 			fmt.Fprintln(g.out, ws+"if data := in.UnsafeBytes(); in.Ok() {")
 			fmt.Fprintln(g.out, ws+"  in.AddError(key.UnmarshalText(data) )")
@@ -268,8 +360,8 @@ func (g *Generator) genTypeDecoderNoCheck(t reflect.Type, out string, tags field
 		fmt.Fprintln(g.out, ws+"  in.Delim('}')")
 		fmt.Fprintln(g.out, ws+"}")
 
-	case reflect.Interface:
-		if t.NumMethod() != 0 {
+	case *types.Interface:
+		if v.NumMethods() != 0 {
 			return fmt.Errorf("interface type %v not supported: only interface{} is allowed", t)
 		}
 		fmt.Fprintln(g.out, ws+"if m, ok := "+out+".(easyjson.Unmarshaler); ok {")
@@ -286,39 +378,40 @@ func (g *Generator) genTypeDecoderNoCheck(t reflect.Type, out string, tags field
 
 }
 
-func (g *Generator) genStructFieldDecoder(t reflect.Type, f reflect.StructField) error {
-	jsonName := g.fieldNamer.GetJSONFieldName(t, f)
-	tags := parseFieldTags(f)
+func (g *Generator) genStructFieldDecoder(t *types.Struct, i int) error {
+	jsonName := g.fieldNamer.GetJSONFieldName(t, i)
+	tags := parseFieldTags(t.Tag(i))
+	fieldVar := t.Field(i)
 
 	if tags.omit {
 		return nil
 	}
 
 	fmt.Fprintf(g.out, "    case %q:\n", jsonName)
-	if err := g.genTypeDecoder(f.Type, "out."+f.Name, tags, 3); err != nil {
+	if err := g.genTypeDecoder(fieldVar.Type(), "out."+fieldVar.Name(), tags, 3); err != nil {
 		return err
 	}
 
 	if tags.required {
-		fmt.Fprintf(g.out, "%sSet = true\n", f.Name)
+		fmt.Fprintf(g.out, "%sSet = true\n", fieldVar.Name())
 	}
 
 	return nil
 }
 
-func (g *Generator) genRequiredFieldSet(t reflect.Type, f reflect.StructField) {
-	tags := parseFieldTags(f)
+func (g *Generator) genRequiredFieldSet(t *types.Struct, i int) {
+	tags := parseFieldTags(t.Tag(i))
 
 	if !tags.required {
 		return
 	}
 
-	fmt.Fprintf(g.out, "var %sSet bool\n", f.Name)
+	fmt.Fprintf(g.out, "var %sSet bool\n", t.Field(i).Name())
 }
 
-func (g *Generator) genRequiredFieldCheck(t reflect.Type, f reflect.StructField) {
-	jsonName := g.fieldNamer.GetJSONFieldName(t, f)
-	tags := parseFieldTags(f)
+func (g *Generator) genRequiredFieldCheck(t *types.Struct, i int) {
+	jsonName := g.fieldNamer.GetJSONFieldName(t, i)
+	tags := parseFieldTags(t.Tag(i))
 
 	if !tags.required {
 		return
@@ -326,81 +419,79 @@ func (g *Generator) genRequiredFieldCheck(t reflect.Type, f reflect.StructField)
 
 	g.imports["fmt"] = "fmt"
 
-	fmt.Fprintf(g.out, "if !%sSet {\n", f.Name)
+	fmt.Fprintf(g.out, "if !%sSet {\n", t.Field(i).Name())
 	fmt.Fprintf(g.out, "    in.AddError(fmt.Errorf(\"key '%s' is required\"))\n", jsonName)
 	fmt.Fprintf(g.out, "}\n")
 }
 
-func mergeStructFields(fields1, fields2 []reflect.StructField) (fields []reflect.StructField) {
+func mergeStructFields(t1, t2 *types.Struct, f1, f2 []int) (fields []int) {
 	used := map[string]bool{}
-	for _, f := range fields2 {
-		used[f.Name] = true
-		fields = append(fields, f)
+	for _, i := range f2 {
+		used[t2.Field(i).Name()] = true
+		fields = append(fields, i)
 	}
 
-	for _, f := range fields1 {
-		if !used[f.Name] {
-			fields = append(fields, f)
+	for _, i := range f1 {
+		if !used[t1.Field(i).Name()] {
+			fields = append(fields, i)
 		}
 	}
 	return
 }
 
-func getStructFields(t reflect.Type) ([]reflect.StructField, error) {
-	if t.Kind() != reflect.Struct {
-		return nil, fmt.Errorf("got %v; expected a struct", t)
-	}
-
-	var efields []reflect.StructField
-	for i := 0; i < t.NumField(); i++ {
+func getStructFields(t *types.Struct) ([]int, error) {
+	var efields []int
+	for i := 0; i < t.NumFields(); i++ {
 		f := t.Field(i)
-		tags := parseFieldTags(f)
-		if !f.Anonymous || tags.name != "" {
+		tags := parseFieldTags(t.Tag(i))
+		if !f.Anonymous() || tags.name != "" {
 			continue
 		}
 
-		t1 := f.Type
-		if t1.Kind() == reflect.Ptr {
-			t1 = t1.Elem()
+		t1 := f.Type()
+		if p, ok := t1.(*types.Pointer); ok {
+			t1 = p.Elem()
 		}
 
-		fs, err := getStructFields(t1)
-		if err != nil {
-			return nil, fmt.Errorf("error processing embedded field: %v", err)
+		if s, ok := t1.(*types.Struct); ok {
+			fs, err := getStructFields(s)
+			if err != nil {
+				return nil, fmt.Errorf("error processing embedded field: %v", err)
+			}
+			efields = mergeStructFields(t, s, efields, fs)
 		}
-		efields = mergeStructFields(efields, fs)
 	}
 
-	var fields []reflect.StructField
-	for i := 0; i < t.NumField(); i++ {
+	var fields []int
+	for i := 0; i < t.NumFields(); i++ {
 		f := t.Field(i)
-		tags := parseFieldTags(f)
-		if f.Anonymous && tags.name == "" {
+		tags := parseFieldTags(t.Tag(i))
+		if f.Anonymous() && tags.name == "" {
 			continue
 		}
 
-		c := []rune(f.Name)[0]
+		c := []rune(f.Name())[0]
 		if unicode.IsUpper(c) {
-			fields = append(fields, f)
+			fields = append(fields, i)
 		}
 	}
-	return mergeStructFields(efields, fields), nil
+	return mergeStructFields(t, t, efields, fields), nil
 }
 
-func (g *Generator) genDecoder(t reflect.Type) error {
-	switch t.Kind() {
-	case reflect.Slice, reflect.Array, reflect.Map:
+func (g *Generator) genDecoder(t types.Type) error {
+	switch t.(type) {
+	case *types.Slice, *types.Array, *types.Map:
 		return g.genSliceArrayDecoder(t)
 	default:
 		return g.genStructDecoder(t)
 	}
 }
 
-func (g *Generator) genSliceArrayDecoder(t reflect.Type) error {
-	switch t.Kind() {
-	case reflect.Slice, reflect.Array, reflect.Map:
+func (g *Generator) genSliceArrayDecoder(t types.Type) error {
+	switch t.Underlying().(type) {
+	case *types.Slice, *types.Array, *types.Map:
 	default:
-		return fmt.Errorf("cannot generate encoder/decoder for %v, not a slice/array/map type", t)
+		return fmt.Errorf("cannot generate decoder for %v, not a slice/array/map type", t)
 	}
 
 	fname := g.getDecoderName(t)
@@ -420,9 +511,10 @@ func (g *Generator) genSliceArrayDecoder(t reflect.Type) error {
 	return nil
 }
 
-func (g *Generator) genStructDecoder(t reflect.Type) error {
-	if t.Kind() != reflect.Struct {
-		return fmt.Errorf("cannot generate encoder/decoder for %v, not a struct type", t)
+func (g *Generator) genStructDecoder(t types.Type) error {
+	v, ok := t.Underlying().(*types.Struct)
+	if !ok {
+		return fmt.Errorf("cannot generate decoder for %v, not a struct type", t)
 	}
 
 	fname := g.getDecoderName(t)
@@ -439,21 +531,25 @@ func (g *Generator) genStructDecoder(t reflect.Type) error {
 	fmt.Fprintln(g.out, "  }")
 
 	// Init embedded pointer fields.
-	for i := 0; i < t.NumField(); i++ {
-		f := t.Field(i)
-		if !f.Anonymous || f.Type.Kind() != reflect.Ptr {
+	for i := 0; i < v.NumFields(); i++ {
+		f := v.Field(i)
+		if !f.Anonymous() {
 			continue
 		}
-		fmt.Fprintln(g.out, "  out."+f.Name+" = new("+g.getType(f.Type.Elem())+")")
+		p, ok := f.Type().(*types.Pointer)
+		if !ok {
+			continue
+		}
+		fmt.Fprintln(g.out, "  out."+f.Name()+" = new("+g.getType(p.Elem())+")")
 	}
 
-	fs, err := getStructFields(t)
+	fs, err := getStructFields(v)
 	if err != nil {
 		return fmt.Errorf("cannot generate decoder for %v: %v", t, err)
 	}
 
 	for _, f := range fs {
-		g.genRequiredFieldSet(t, f)
+		g.genRequiredFieldSet(v, f)
 	}
 
 	fmt.Fprintln(g.out, "  in.Delim('{')")
@@ -468,7 +564,7 @@ func (g *Generator) genStructDecoder(t reflect.Type) error {
 
 	fmt.Fprintln(g.out, "    switch key {")
 	for _, f := range fs {
-		if err := g.genStructFieldDecoder(t, f); err != nil {
+		if err := g.genStructFieldDecoder(v, f); err != nil {
 			return err
 		}
 	}
@@ -492,7 +588,7 @@ func (g *Generator) genStructDecoder(t reflect.Type) error {
 	fmt.Fprintln(g.out, "  }")
 
 	for _, f := range fs {
-		g.genRequiredFieldCheck(t, f)
+		g.genRequiredFieldCheck(v, f)
 	}
 
 	fmt.Fprintln(g.out, "}")
@@ -500,11 +596,11 @@ func (g *Generator) genStructDecoder(t reflect.Type) error {
 	return nil
 }
 
-func (g *Generator) genStructUnmarshaler(t reflect.Type) error {
-	switch t.Kind() {
-	case reflect.Slice, reflect.Array, reflect.Map, reflect.Struct:
+func (g *Generator) genStructUnmarshaler(t types.Type) error {
+	switch t.Underlying().(type) {
+	case *types.Slice, *types.Array, *types.Map, *types.Struct:
 	default:
-		return fmt.Errorf("cannot generate encoder/decoder for %v, not a struct/slice/array/map type", t)
+		return fmt.Errorf("cannot generate decoder for %v, not a struct/slice/array/map type", t)
 	}
 
 	fname := g.getDecoderName(t)
